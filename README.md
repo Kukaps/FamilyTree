@@ -14,13 +14,17 @@ A Laravel-based family tree management application.
 1. **Clone and Install**
 
 git clone https:/f/github.com/Kukaps/FamilyTree.git
+
 cd FamilyTree
+
 composer install
+
 npm install
 
 2. **Configuration**
 
 cp .env.example .env
+
 php artisan key:generate
 
 Update `.env` with your MySQL details
@@ -28,4 +32,5 @@ Update `.env` with your MySQL details
 php artisan migrate
 
 npm run dev
+
 php artisan serve
