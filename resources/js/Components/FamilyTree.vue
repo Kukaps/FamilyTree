@@ -1,5 +1,25 @@
 <template>
     <div class="family-tree-container">
+        <!-- Add this before your existing form -->
+        <div v-if="savedTrees.length > 0" class="mb-6">
+            <h3 class="text-lg font-semibold mb-2">Saved Family Trees</h3>
+            <div class="grid gap-4">
+                <div v-for="tree in savedTrees" 
+                     :key="tree.id" 
+                     class="bg-white p-4 rounded-lg shadow flex justify-between items-center">
+                    <div>
+                        <h4 class="font-medium">{{ tree.name }}</h4>
+                        <p class="text-sm text-gray-500">Created: {{ tree.created_at }}</p>
+                        <p class="text-sm text-gray-500">Members: {{ tree.total_individuals }}</p>
+                    </div>
+                    <button @click="loadTree(tree.id)"
+                            class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                        Load
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- Input Form -->
         <form @submit.prevent="parseAndRender" class="space-y-4">
             <div>
@@ -57,11 +77,22 @@
         >
             <!-- D3 will render here -->
         </div>
+
+        <!-- Add this button after the existing form -->
+        <button 
+            v-if="gedcomData"
+            @click="saveToDatabase" 
+            class="mt-4 w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700"
+            :disabled="isSaving"
+        >
+            {{ isSaving ? 'Saving...' : 'Save to Database' }}
+        </button>
     </div>
 </template>
 
 <script>
 import * as d3 from 'd3';
+import { router } from '@inertiajs/vue3'
 
 export default {
     data() {
@@ -72,8 +103,33 @@ export default {
             width: 800,
             height: 600,
             isLoading: false,
-            errorMessage: null
+            errorMessage: null,
+            isSaving: false,
+            savedTrees: []
         };
+    },
+    mounted() {
+        window.addEventListener('resize', this.handleResize);
+    },
+    beforeDestroy() {
+        window.removeEventListener('resize', this.handleResize);
+    },
+    async mounted() {
+        // Add this to check auth status
+        try {
+            const response = await fetch('/api/user', {
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                },
+                credentials: 'include'
+            });
+            console.log('Authenticated user:', response.data);
+        } catch (error) {
+            console.error('Auth check failed:', error);
+        }
+        
+        await this.loadSavedTrees();
     },
     methods: {
         async parseAndRender() {
@@ -118,14 +174,17 @@ export default {
         },
 
         renderTree() {
-            if (!this.svg || !this.treeData) return;
+            if (!this.svg || !this.treeData) {
+                console.log('No SVG or tree data');
+                return;
+            }
 
             console.log('Rendering tree with data:', this.treeData);
 
             // Clear existing tree
             this.svg.selectAll('*').remove();
 
-            // Creates a tree layout with more space
+            // Creates a tree layout
             const treeLayout = d3.tree()
                 .size([this.height - 80, this.width - 200]);
 
@@ -135,8 +194,10 @@ export default {
             // Assigns the data to the tree layout
             const treeData = treeLayout(root);
 
+            console.log('Processed tree data:', treeData);
+
             // Add links between nodes
-            this.svg.selectAll('.link')
+            const links = this.svg.selectAll('.link')
                 .data(treeData.links())
                 .enter()
                 .append('path')
@@ -145,7 +206,7 @@ export default {
                     .x(d => d.y)
                     .y(d => d.x));
 
-            // Add nodes with more detailed information
+            // Add nodes
             const nodes = this.svg.selectAll('.node')
                 .data(treeData.descendants())
                 .enter()
@@ -155,22 +216,21 @@ export default {
 
             // Add circles for nodes
             nodes.append('circle')
-                .attr('r', 8)
-                .style('fill', '#fff')
-                .style('stroke', '#3b82f6')
-                .style('stroke-width', '2px');
+                .attr('r', 8);
 
-            // Add labels with more spacing
+            // Add labels
             nodes.append('text')
-                .attr('dy', '0.31em')
+                .attr('dy', '.31em')
                 .attr('x', d => d.children ? -12 : 12)
                 .attr('text-anchor', d => d.children ? 'end' : 'start')
-                .text(d => d.data.name)
-                .style('font-size', '12px')
-                .style('font-family', 'sans-serif');
+                .text(d => d.data.name);
         },
 
         parseGedcom(gedcomData) {
+            if (!gedcomData.trim()) {
+                throw new Error('GEDCOM data is empty');
+            }
+
             console.log('Starting GEDCOM parsing');
             const lines = gedcomData.split('\n');
             const individuals = new Map();
@@ -178,132 +238,240 @@ export default {
             let currentRecord = null;
             let currentType = null;
 
-            // First pass: collect individuals and families
-            lines.forEach(line => {
-                const parts = line.trim().split(' ');
-                const level = parts[0];
-                
-                if (level === '0') {
-                    if (parts[1].startsWith('@I')) {
-                        currentRecord = parts[1];
-                        currentType = 'INDI';
-                        individuals.set(currentRecord, {
-                            id: currentRecord,
-                            name: '',
-                            sex: '',
-                            birth: '',
-                            parents: [],
-                            families: []
-                        });
-                        console.log('Found individual:', currentRecord);
-                    } else if (parts[1].startsWith('@F')) {
-                        currentRecord = parts[1];
-                        currentType = 'FAM';
-                        families.set(currentRecord, {
-                            id: currentRecord,
-                            husband: null,
-                            wife: null,
-                            children: []
-                        });
-                        console.log('Found family:', currentRecord);
-                    }
-                } else if (currentRecord) {
-                    if (currentType === 'INDI') {
-                        const tag = parts[1];
-                        const value = parts.slice(2).join(' ');
-                        const individual = individuals.get(currentRecord);
+            try {
+                // First pass: collect individuals and families
+                lines.forEach((line, index) => {
+                    const parts = line.trim().split(/\s+/);
+                    if (parts.length < 2) return;
 
-                        switch(tag) {
-                            case 'NAME':
-                                individual.name = value.replace(/\//g, '');
-                                console.log('Set name:', individual.name);
-                                break;
-                            case 'SEX':
-                                individual.sex = value;
-                                break;
-                            case 'FAMC':
-                                individual.parents.push(value);
-                                console.log(`Added parent family ${value} to ${individual.name}`);
-                                break;
-                            case 'FAMS':
-                                individual.families.push(value);
-                                break;
+                    const level = parseInt(parts[0]);
+                    if (level === 0) {
+                        if (parts[1].startsWith('@I')) {
+                            currentRecord = parts[1];
+                            currentType = 'INDI';
+                            individuals.set(currentRecord, {
+                                id: currentRecord,
+                                name: '',
+                                sex: '',
+                                birth: '',
+                                parents: [],
+                                families: []
+                            });
+                        } else if (parts[1].startsWith('@F')) {
+                            currentRecord = parts[1];
+                            currentType = 'FAM';
+                            families.set(currentRecord, {
+                                id: currentRecord,
+                                husband: null,
+                                wife: null,
+                                children: []
+                            });
+                        } else {
+                            currentRecord = null;
+                            currentType = null;
                         }
-                    } else if (currentType === 'FAM') {
-                        const tag = parts[1];
-                        const value = parts[2];
-                        const family = families.get(currentRecord);
+                    } else if (currentRecord) {
+                        if (currentType === 'INDI') {
+                            const tag = parts[1];
+                            const value = parts.slice(2).join(' ');
+                            const individual = individuals.get(currentRecord);
 
-                        switch(tag) {
-                            case 'HUSB':
-                                family.husband = value;
-                                console.log(`Added husband ${value} to family ${currentRecord}`);
-                                break;
-                            case 'WIFE':
-                                family.wife = value;
-                                console.log(`Added wife ${value} to family ${currentRecord}`);
-                                break;
-                            case 'CHIL':
-                                family.children.push(value);
-                                console.log(`Added child ${value} to family ${currentRecord}`);
-                                break;
+                            switch(tag) {
+                                case 'NAME':
+                                    individual.name = value.replace(/\//g, '').trim();
+                                    break;
+                                case 'SEX':
+                                    individual.sex = value;
+                                    break;
+                                case 'FAMC':
+                                    individual.parents.push(value);
+                                    break;
+                                case 'FAMS':
+                                    individual.families.push(value);
+                                    break;
+                            }
+                        } else if (currentType === 'FAM') {
+                            const tag = parts[1];
+                            const value = parts[2];
+                            const family = families.get(currentRecord);
+
+                            switch(tag) {
+                                case 'HUSB':
+                                    family.husband = value;
+                                    break;
+                                case 'WIFE':
+                                    family.wife = value;
+                                    break;
+                                case 'CHIL':
+                                    family.children.push(value);
+                                    break;
+                            }
                         }
                     }
+                });
+
+                console.log('Parsed Individuals:', [...individuals.entries()]);
+                console.log('Parsed Families:', [...families.entries()]);
+
+                // Start with @I1@ as the root
+                const rootPerson = individuals.get('@I1@');
+                if (!rootPerson) {
+                    throw new Error('Root person (@I1@) not found');
                 }
-            });
 
-            console.log('Parsed Individuals:', [...individuals.entries()]);
-            console.log('Parsed Families:', [...families.entries()]);
+                return this.buildTreeStructure('@I1@', individuals, families);
 
-            // Find root person (Kristaps)
-            const rootPerson = individuals.get('@I1@');
-            return this.buildTreeStructure(rootPerson.id, individuals, families);
+            } catch (error) {
+                console.error('GEDCOM parsing error:', error);
+                throw new Error(`GEDCOM parsing failed: ${error.message}`);
+            }
         },
 
-        buildTreeStructure(personId, individuals, families) {
+        buildTreeStructure(personId, individuals, families, processed = new Set()) {
+            console.log('Processing person:', personId);
+            
+            // Prevent infinite recursion
+            if (processed.has(personId)) {
+                console.log('Already processed:', personId);
+                return null;
+            }
+            processed.add(personId);
+
             const person = individuals.get(personId);
             if (!person) {
                 console.log('Person not found:', personId);
                 return null;
             }
 
-            console.log('Building tree for:', person.name, 'ID:', personId);
+            console.log('Building node for:', person.name);
 
             const node = {
-                name: person.name,
+                name: person.name || 'Unknown',
                 id: personId,
                 children: []
             };
 
-            // Process parent families
-            for (const familyId of person.parents) {
-                console.log(`Processing family ${familyId} for person ${person.name}`);
-                const family = families.get(familyId);
-                
-                if (family) {
-                    // Process father
-                    if (family.husband) {
-                        const father = individuals.get(family.husband);
-                        console.log(`Found father: ${father?.name} (${family.husband})`);
-                        const fatherNode = this.buildTreeStructure(family.husband, individuals, families);
-                        if (fatherNode) {
-                            node.children.push(fatherNode);
-                        }
-                    }
+            // Find all families where this person is a child
+            const parentFamilies = [...families.values()].filter(f => 
+                f.children && f.children.includes(personId)
+            );
 
-                    // Process mother
-                    if (family.wife) {
-                        const mother = individuals.get(family.wife);
-                        console.log(`Found mother: ${mother?.name} (${family.wife})`);
-                        const motherNode = this.buildTreeStructure(family.wife, individuals, families);
-                        if (motherNode) {
-                            node.children.push(motherNode);
-                        }
+            // Add parents
+            for (const family of parentFamilies) {
+                console.log('Processing parent family:', family.id);
+                
+                if (family.husband) {
+                    console.log('Adding father:', family.husband);
+                    const fatherNode = this.buildTreeStructure(family.husband, individuals, families, new Set(processed));
+                    if (fatherNode) node.children.push(fatherNode);
+                }
+                
+                if (family.wife) {
+                    console.log('Adding mother:', family.wife);
+                    const motherNode = this.buildTreeStructure(family.wife, individuals, families, new Set(processed));
+                    if (motherNode) node.children.push(motherNode);
+                }
+            }
+
+            // Find all families where this person is a parent
+            const ownFamilies = [...families.values()].filter(f => 
+                f.husband === personId || f.wife === personId
+            );
+
+            // Add children
+            for (const family of ownFamilies) {
+                console.log('Processing own family:', family.id);
+                
+                if (family.children) {
+                    for (const childId of family.children) {
+                        console.log('Adding child:', childId);
+                        const childNode = this.buildTreeStructure(childId, individuals, families, new Set(processed));
+                        if (childNode) node.children.push(childNode);
                     }
                 }
             }
 
+            console.log(`Finished node ${person.name} with ${node.children.length} children`);
             return node;
+        },
+
+        async saveToDatabase() {
+            if (!this.gedcomData) return;
+            
+            this.isSaving = true;
+            try {
+                const response = await fetch('/api/store-family-tree', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                    },
+                    body: JSON.stringify({
+                        gedcomData: this.gedcomData
+                    }),
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to save');
+                }
+
+                const data = await response.json();
+                alert('Family tree saved successfully!');
+                await this.loadSavedTrees();
+            } catch (error) {
+                console.error('Failed to save family tree:', error);
+                alert('Failed to save family tree: ' + error.message);
+            } finally {
+                this.isSaving = false;
+            }
+        },
+
+        async loadSavedTrees() {
+            try {
+                const response = await fetch('/api/family-trees', {
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                    },
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load trees');
+                }
+
+                const data = await response.json();
+                this.savedTrees = data;
+            } catch (error) {
+                console.error('Failed to load saved trees:', error);
+            }
+        },
+
+        async loadTree(id) {
+            this.isLoading = true;
+            try {
+                const response = await fetch(`/api/family-trees/${id}`, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                    },
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load tree');
+                }
+
+                const data = await response.json();
+                this.treeData = data;
+                this.renderTree();
+            } catch (error) {
+                console.error('Failed to load tree:', error);
+                alert('Failed to load family tree');
+            } finally {
+                this.isLoading = false;
+            }
         }
     }
 };

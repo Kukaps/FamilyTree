@@ -1,7 +1,13 @@
 <?php
 
+use App\Http\Controllers\FamilyTreeStorageController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\FamilyTreeController;
 
-Route::post('/family-tree', [FamilyTreeController::class, 'getFamilyTree']);
+Route::middleware(['auth:sanctum', 'web'])->group(function () {
+    Route::get('/user', function (Request $request) {
+        return $request->user();
+    });
+    Route::get('/family-trees', [FamilyTreeStorageController::class, 'index']);
+    Route::post('/store-family-tree', [FamilyTreeStorageController::class, 'store']);
+});
